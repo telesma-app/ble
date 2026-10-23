@@ -21,6 +21,7 @@ func UUID16(value uint16) UUID {
 	uuid := bluetoothBaseUUID
 	uuid[2] = byte(value >> 8)
 	uuid[3] = byte(value)
+
 	return uuid
 }
 
@@ -31,28 +32,35 @@ func (u UUID) String() string {
 
 func parseUUID(value string) (UUID, error) {
 	var uuid UUID
+
 	switch len(value) {
 	case 4:
 		decoded, err := hex.DecodeString(value)
 		if err != nil {
 			return UUID{}, err
 		}
+
 		return UUID16(uint16(decoded[0])<<8 | uint16(decoded[1])), nil
 	case 8:
 		decoded, err := hex.DecodeString(value)
 		if err != nil {
 			return UUID{}, err
 		}
+
 		uuid = bluetoothBaseUUID
 		copy(uuid[:4], decoded)
+
 		return uuid, nil
 	case 36:
 		compact := value[0:8] + value[9:13] + value[14:18] + value[19:23] + value[24:36]
+
 		decoded, err := hex.DecodeString(compact)
 		if err != nil {
 			return UUID{}, err
 		}
+
 		copy(uuid[:], decoded)
+
 		return uuid, nil
 	default:
 		return UUID{}, fmt.Errorf("ble: invalid UUID %q", value)

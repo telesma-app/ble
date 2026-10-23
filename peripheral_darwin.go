@@ -5,6 +5,7 @@ package ble
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 
 	"github.com/ebitengine/purego/objc"
@@ -56,6 +57,7 @@ type darwinPeripheral struct {
 func newDarwinPeripheral(manager *darwinManager, native objc.ID) *darwinPeripheral {
 	gate := make(chan struct{}, 1)
 	gate <- struct{}{}
+
 	return &darwinPeripheral{
 		manager:       manager,
 		native:        native,
@@ -82,6 +84,7 @@ func (p *darwinPeripheral) beginOperation(
 		target: target,
 		result: make(chan operationResult, 1),
 	}
+
 	p.mu.Lock()
 	if p.closed || p.closing {
 		err := p.terminalErr
@@ -89,24 +92,35 @@ func (p *darwinPeripheral) beginOperation(
 			err = ErrClosed
 		}
 		p.mu.Unlock()
+
 		p.gate <- struct{}{}
+
 		return nil, err
 	}
+
 	if kind == operationReadValueForCharacteristic && p.subscriptions[target] != nil {
 		p.mu.Unlock()
+
 		p.gate <- struct{}{}
+
 		return nil, errors.New("ble: cannot read a subscribed characteristic")
 	}
+
 	if subscription != nil {
 		if p.subscriptions[target] != nil {
 			p.mu.Unlock()
+
 			p.gate <- struct{}{}
+
 			return nil, errors.New("ble: characteristic already has a notification subscription")
 		}
+
 		p.subscriptions[target] = subscription
 	}
+
 	p.pending = op
 	p.mu.Unlock()
+
 	return op, nil
 }
 
@@ -120,8 +134,11 @@ func (p *darwinPeripheral) runOperation(
 	if err != nil {
 		return operationResult{}, err
 	}
+
 	start()
+
 	result, err, _ := p.waitOperation(ctx, op, nil)
+
 	return result, err
 }
 
@@ -133,61 +150,68 @@ func (p *darwinPeripheral) waitOperation(
 	select {
 	case <-ctx.Done():
 		p.mu.Lock()
+
 		pending := p.pending == op
 		if pending {
 			op.abandoned = abandoned
 		}
 		p.mu.Unlock()
+
 		if !pending {
 			result := <-op.result
 			return result, result.err, false
 		}
+
 		return operationResult{}, ctx.Err(), true
 	case result := <-op.result:
 		return result, result.err, false
 	}
 }
 
-func (p *darwinPeripheral) deliverOperation(
-	op *darwinOperation,
-	result operationResult,
-	abandoned func(operationResult),
-) {
+// The operation is detached from p.pending before delivery, so abandoned is final.
+func (p *darwinPeripheral) deliverOperation(op *darwinOperation, result operationResult) {
 	op.result <- result
+
 	p.gate <- struct{}{}
-	if abandoned != nil {
-		go abandoned(result)
+
+	if op.abandoned != nil {
+		go op.abandoned(result)
 	}
 }
 
 func (p *darwinPeripheral) completeOperation(kind operationKind, target objc.ID, result operationResult) bool {
 	p.mu.Lock()
+
 	op := p.pending
 	if op == nil || op.kind != kind || op.target != target {
 		p.mu.Unlock()
 		return false
 	}
+
 	p.pending = nil
-	abandoned := op.abandoned
 	p.mu.Unlock()
-	p.deliverOperation(op, result, abandoned)
+	p.deliverOperation(op, result)
+
 	return true
 }
 
 func (p *darwinPeripheral) completeNotificationOperation(target objc.ID, result operationResult) bool {
 	p.mu.Lock()
+
 	op := p.pending
 	if op == nil || op.target != target || (op.kind != operationEnableNotifications && op.kind != operationDisableNotifications) {
 		p.mu.Unlock()
 		return false
 	}
+
 	if op.kind == operationDisableNotifications && result.err == nil {
 		delete(p.subscriptions, target)
 	}
+
 	p.pending = nil
-	abandoned := op.abandoned
 	p.mu.Unlock()
-	p.deliverOperation(op, result, abandoned)
+	p.deliverOperation(op, result)
+
 	return true
 }
 
@@ -199,18 +223,18 @@ func (p *darwinPeripheral) DiscoverServices(ctx context.Context, uuids ...UUID) 
 		return nil, err
 	}
 
-	wanted := uuidSet(uuids)
 	var services []Service
+
 	for _, native := range objectsFromNSArray(objc.Send[objc.ID](p.native, selServices)) {
 		uuid, err := uuidFromCBUUID(objc.Send[objc.ID](native, selUUID))
 		if err != nil {
 			return nil, runtimeError("CBService.UUID", err)
 		}
-		if len(wanted) != 0 {
-			if _, ok := wanted[uuid]; !ok {
-				continue
-			}
+
+		if len(uuids) != 0 && !slices.Contains(uuids, uuid) {
+			continue
 		}
+
 		services = append(services, &darwinService{
 			peripheral: p,
 			native:     native,
@@ -218,6 +242,7 @@ func (p *darwinPeripheral) DiscoverServices(ctx context.Context, uuids ...UUID) 
 			primary:    objc.Send[bool](native, selIsPrimary),
 		})
 	}
+
 	return services, nil
 }
 
@@ -227,17 +252,22 @@ func (p *darwinPeripheral) Close() error {
 		if p.closed {
 			p.closeErr = p.terminalErr
 			p.mu.Unlock()
+
 			return
 		}
+
 		p.closing = true
 		p.mu.Unlock()
 
 		p.manager.central.Send(selCancelPeripheralConnection, p.native)
+
 		if objc.Send[int](p.native, selState) != cbPeripheralStateConnected {
 			p.handleDisconnect(nil)
 		}
+
 		<-p.disconnected
 	})
+
 	return p.closeErr
 }
 
@@ -246,39 +276,38 @@ func (p *darwinPeripheral) handleDisconnect(err error) {
 		p.mu.Lock()
 		localClose := p.closing
 		p.closed = true
+
 		if !localClose {
 			if err == nil {
 				err = ErrDisconnected
 			}
+
 			p.terminalErr = err
 			p.closeErr = err
 		}
+
 		pending := p.pending
 		p.pending = nil
 		operationErr := err
 		subscriptionErr := err
+
 		if localClose {
 			operationErr = ErrClosed
 			subscriptionErr = nil
 		}
-		result := operationResult{err: operationErr}
-		var abandoned func(operationResult)
-		if pending != nil {
-			abandoned = pending.abandoned
-		}
-		subscriptions := make([]*darwinSubscription, 0, len(p.subscriptions))
-		for _, subscription := range p.subscriptions {
-			subscriptions = append(subscriptions, subscription)
-		}
+
+		subscriptions := p.subscriptions
 		p.subscriptions = nil
 		p.mu.Unlock()
 
 		if pending != nil {
-			p.deliverOperation(pending, result, abandoned)
+			p.deliverOperation(pending, operationResult{err: operationErr})
 		}
+
 		for _, subscription := range subscriptions {
 			subscription.finish(subscriptionErr)
 		}
+
 		close(p.disconnected)
 	})
 }
@@ -286,6 +315,7 @@ func (p *darwinPeripheral) handleDisconnect(err error) {
 func (p *darwinPeripheral) subscription(native objc.ID) *darwinSubscription {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	return p.subscriptions[native]
 }
 
@@ -295,17 +325,6 @@ func (p *darwinPeripheral) removeSubscription(subscription *darwinSubscription) 
 		delete(p.subscriptions, subscription.characteristic)
 	}
 	p.mu.Unlock()
-}
-
-func uuidSet(values []UUID) map[UUID]struct{} {
-	if len(values) == 0 {
-		return nil
-	}
-	result := make(map[UUID]struct{}, len(values))
-	for _, value := range values {
-		result[value] = struct{}{}
-	}
-	return result
 }
 
 type darwinService struct {
@@ -331,18 +350,18 @@ func (s *darwinService) DiscoverCharacteristics(ctx context.Context, uuids ...UU
 		return nil, err
 	}
 
-	wanted := uuidSet(uuids)
 	var characteristics []Characteristic
+
 	for _, native := range objectsFromNSArray(objc.Send[objc.ID](s.native, selCharacteristics)) {
 		uuid, err := uuidFromCBUUID(objc.Send[objc.ID](native, selUUID))
 		if err != nil {
 			return nil, runtimeError("CBCharacteristic.UUID", err)
 		}
-		if len(wanted) != 0 {
-			if _, ok := wanted[uuid]; !ok {
-				continue
-			}
+
+		if len(uuids) != 0 && !slices.Contains(uuids, uuid) {
+			continue
 		}
+
 		characteristics = append(characteristics, &darwinCharacteristic{
 			service:    s,
 			native:     native,
@@ -350,6 +369,7 @@ func (s *darwinService) DiscoverCharacteristics(ctx context.Context, uuids ...UU
 			properties: CharacteristicProperties(objc.Send[uint16](native, selProperties)),
 		})
 	}
+
 	return characteristics, nil
 }
 
@@ -375,6 +395,7 @@ func (c *darwinCharacteristic) Read(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	return result.data, nil
 }
 
@@ -387,6 +408,7 @@ func (c *darwinCharacteristic) Write(ctx context.Context, value []byte) error {
 			cbCharacteristicWriteWithResponse,
 		)
 	})
+
 	return err
 }
 
@@ -397,20 +419,26 @@ func (c *darwinCharacteristic) Subscribe(ctx context.Context) (Subscription, err
 		characteristic: c.native,
 		values:         newValueQueue(),
 	}
+
 	op, err := p.beginOperation(ctx, operationEnableNotifications, c.native, subscription)
 	if err != nil {
 		subscription.values.Close()
 		return nil, err
 	}
+
 	p.native.Send(selSetNotifyValueForCharacteristic, true, c.native)
+
 	_, err, abandoned := p.waitOperation(ctx, op, subscription.cancelLateEnable)
 	if err != nil {
 		subscription.finish(err)
+
 		if !abandoned {
 			p.removeSubscription(subscription)
 		}
+
 		return nil, err
 	}
+
 	return subscription, nil
 }
 
@@ -437,6 +465,7 @@ func (s *darwinSubscription) Close() error {
 		finished := s.finished
 		terminal := s.terminal
 		s.mu.Unlock()
+
 		if finished {
 			s.closeErr = terminal
 			return
@@ -448,6 +477,7 @@ func (s *darwinSubscription) Close() error {
 		s.finish(err)
 		s.closeErr = err
 	})
+
 	return s.closeErr
 }
 
@@ -456,6 +486,7 @@ func (s *darwinSubscription) cancelLateEnable(result operationResult) {
 		s.peripheral.removeSubscription(s)
 		return
 	}
+
 	_, _ = s.peripheral.runOperation(context.Background(), operationDisableNotifications, s.characteristic, func() {
 		s.peripheral.native.Send(selSetNotifyValueForCharacteristic, false, s.characteristic)
 	})
@@ -467,6 +498,7 @@ func (s *darwinSubscription) finish(err error) {
 		s.mu.Unlock()
 		return
 	}
+
 	s.finished = true
 	s.terminal = err
 	s.mu.Unlock()
@@ -478,9 +510,11 @@ func managerPeripheral(self objc.ID, peripheral objc.ID) *darwinPeripheral {
 	if !ok {
 		return nil
 	}
+
 	m := value.(*darwinManager)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
 	return m.active[peripheral]
 }
 
@@ -523,22 +557,28 @@ func peripheralDidUpdateValueForCharacteristic(
 	if p == nil {
 		return
 	}
+
 	err := errorFromNSError("readValueForCharacteristic:", nsError, nil)
+
 	var data []byte
 	if err == nil {
 		data = dataFromNSData(objc.Send[objc.ID](characteristic, selValue))
 	}
+
 	if p.completeOperation(operationReadValueForCharacteristic, characteristic, operationResult{data: data, err: err}) {
 		return
 	}
+
 	subscription := p.subscription(characteristic)
 	if subscription == nil {
 		return
 	}
+
 	if err != nil {
 		subscription.finish(err)
 		return
 	}
+
 	subscription.values.Send(data)
 }
 
@@ -570,14 +610,17 @@ func peripheralDidUpdateNotificationStateForCharacteristic(
 	if p == nil {
 		return
 	}
+
 	err := errorFromNSError("setNotifyValue:forCharacteristic:", nsError, nil)
 	if err == nil {
 		p.mu.Lock()
 		op := p.pending
 		p.mu.Unlock()
+
 		if op != nil && op.kind == operationEnableNotifications && !objc.Send[bool](characteristic, selIsNotifying) {
 			err = errors.New("ble: peripheral did not enable notifications")
 		}
 	}
+
 	p.completeNotificationOperation(characteristic, operationResult{err: err})
 }

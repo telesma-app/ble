@@ -18,7 +18,7 @@ link as part of the GATT operation.
 | macOS amd64/arm64 | CoreBluetooth and Foundation via `purego` |
 | Linux and Windows | Unsupported stub returning `ble.ErrUnavailable` |
 
-The module requires Go 1.25 or newer. It is currently an untagged prototype
+The module requires Go 1.26 or newer. It is currently an untagged prototype
 used by the CTAP BLE backend in `github.com/telesma-app/ctap`.
 
 ## Usage
@@ -56,6 +56,14 @@ and an appropriate `NSBluetoothAlwaysUsageDescription`. Command-line use also
 requires Bluetooth permission for the terminal application. See Apple's
 [`CBCentralManager` documentation](https://developer.apple.com/documentation/corebluetooth/cbcentralmanager)
 for the native central-role lifecycle.
+
+## Linting
+
+With golangci-lint v2 installed:
+
+```sh
+make lint
+```
 
 ## Testing
 

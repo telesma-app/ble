@@ -4,9 +4,7 @@ package ble
 
 import (
 	"errors"
-	"fmt"
 	"runtime"
-	"strings"
 	"sync"
 	"unsafe"
 
@@ -70,8 +68,6 @@ var (
 )
 
 var (
-	coreBluetoothHandle uintptr
-	foundationHandle    uintptr
 	dispatchQueueCreate func(string, uintptr) uintptr
 
 	loadDarwinRuntime = sync.OnceValue(initDarwinRuntime)
@@ -80,26 +76,28 @@ var (
 )
 
 func initDarwinRuntime() error {
-	var err error
-	coreBluetoothHandle, err = purego.Dlopen(
+	// These libraries stay loaded for the process lifetime.
+	if _, err := purego.Dlopen(
 		"/System/Library/Frameworks/CoreBluetooth.framework/CoreBluetooth",
 		purego.RTLD_NOW|purego.RTLD_GLOBAL,
-	)
-	if err != nil {
+	); err != nil {
 		return errors.Join(ErrUnavailable, err)
 	}
-	foundationHandle, err = purego.Dlopen(
+
+	if _, err := purego.Dlopen(
 		"/System/Library/Frameworks/Foundation.framework/Foundation",
 		purego.RTLD_NOW|purego.RTLD_GLOBAL,
-	)
-	if err != nil {
+	); err != nil {
 		return errors.Join(ErrUnavailable, err)
 	}
+
 	libSystem, err := purego.Dlopen("/usr/lib/libSystem.B.dylib", purego.RTLD_NOW|purego.RTLD_GLOBAL)
 	if err != nil {
 		return errors.Join(ErrUnavailable, err)
 	}
+
 	purego.RegisterLibFunc(&dispatchQueueCreate, libSystem, "dispatch_queue_create")
+
 	return nil
 }
 
@@ -107,6 +105,7 @@ func registerDelegateClass() (objc.Class, error) {
 	if err := loadDarwinRuntime(); err != nil {
 		return 0, err
 	}
+
 	return objc.RegisterClass(
 		"TelesmaBLEDelegate",
 		objc.GetClass("NSObject"),
@@ -138,6 +137,7 @@ func stringFromNSString(value objc.ID) string {
 	if value == 0 {
 		return ""
 	}
+
 	return objc.Send[string](value, selUTF8String)
 }
 
@@ -145,49 +145,44 @@ func newCBUUID(uuid UUID) objc.ID {
 	return objc.Send[objc.ID](objc.ID(objc.GetClass("CBUUID")), selUUIDWithString, newNSString(uuid.String()))
 }
 
-func newNSMutableArray(values []objc.ID) objc.ID {
-	array := objc.Send[objc.ID](objc.ID(objc.GetClass("NSMutableArray")), selArray)
-	for _, value := range values {
-		array.Send(selAddObject, value)
-	}
-	return array
-}
-
 func newCBUUIDArray(values []UUID) objc.ID {
 	if len(values) == 0 {
 		return 0
 	}
-	objects := make([]objc.ID, len(values))
-	for index, value := range values {
-		objects[index] = newCBUUID(value)
+
+	array := objc.Send[objc.ID](objc.ID(objc.GetClass("NSMutableArray")), selArray)
+	for _, value := range values {
+		array.Send(selAddObject, newCBUUID(value))
 	}
-	return newNSMutableArray(objects)
+
+	return array
 }
 
 func uuidFromCBUUID(value objc.ID) (UUID, error) {
 	text := stringFromNSString(objc.Send[objc.ID](value, selUUIDString))
-	return parseUUID(strings.ToLower(text))
+	return parseUUID(text)
 }
 
 func objectsFromNSArray(value objc.ID) []objc.ID {
 	if value == 0 {
 		return nil
 	}
+
 	count := objc.Send[uintptr](value, selCount)
+
 	result := make([]objc.ID, count)
 	for index := range result {
 		result[index] = objc.Send[objc.ID](value, selObjectAtIndex, uintptr(index))
 	}
+
 	return result
 }
 
 func newNSData(value []byte) objc.ID {
-	var pointer unsafe.Pointer
-	if len(value) != 0 {
-		pointer = unsafe.Pointer(unsafe.SliceData(value))
-	}
+	pointer := unsafe.Pointer(unsafe.SliceData(value))
 	data := objc.Send[objc.ID](objc.ID(objc.GetClass("NSData")), selDataWithBytesLength, pointer, uintptr(len(value)))
 	runtime.KeepAlive(value)
+
 	return data
 }
 
@@ -195,11 +190,14 @@ func dataFromNSData(value objc.ID) []byte {
 	if value == 0 {
 		return nil
 	}
+
 	length := objc.Send[uintptr](value, selLength)
 	if length == 0 {
 		return []byte{}
 	}
+
 	pointer := objc.Send[unsafe.Pointer](value, selBytes)
+
 	return append([]byte(nil), unsafe.Slice((*byte)(pointer), length)...)
 }
 
@@ -207,9 +205,11 @@ func errorFromNSError(operation string, value objc.ID, cause error) error {
 	if value == 0 {
 		return cause
 	}
+
 	domain := stringFromNSString(objc.Send[objc.ID](value, selDomain))
 	description := stringFromNSString(objc.Send[objc.ID](value, selLocalizedDescription))
 	code := objc.Send[int64](value, selCode)
+
 	return &Error{
 		Operation:   operation,
 		Domain:      domain,
@@ -224,23 +224,10 @@ func identifierFromCBPeripheral(peripheral objc.ID) Identifier {
 	return Identifier(stringFromNSString(objc.Send[objc.ID](identifier, selUUIDString)))
 }
 
-func retain(value objc.ID) objc.ID {
-	if value != 0 {
-		value.Send(selRetain)
-	}
-	return value
-}
-
-func release(value objc.ID) {
-	if value != 0 {
-		value.Send(selRelease)
-	}
-}
-
 func runtimeError(operation string, err error) error {
 	return &Error{Operation: operation, Description: err.Error(), Err: err}
 }
 
 func invalidNativeValue(operation string) error {
-	return runtimeError(operation, fmt.Errorf("ble: native API returned an invalid value"))
+	return runtimeError(operation, errors.New("ble: native API returned an invalid value"))
 }

@@ -25,6 +25,7 @@ func (e *Error) Error() string {
 	if e.Description == "" {
 		return e.Operation + " failed"
 	}
+
 	return e.Operation + ": " + e.Description
 }
 

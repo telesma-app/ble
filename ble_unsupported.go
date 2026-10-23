@@ -14,6 +14,7 @@ func Scan(ctx context.Context, _ UUID) iter.Seq2[*DeviceInfo, error] {
 			yield(nil, err)
 			return
 		}
+
 		yield(nil, ErrUnavailable)
 	}
 }
@@ -23,5 +24,6 @@ func Open(ctx context.Context, _ Identifier) (Peripheral, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	return nil, ErrUnavailable
 }

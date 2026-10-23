@@ -27,7 +27,6 @@ var defaultManager = sync.OnceValues(newDarwinManager)
 type darwinManager struct {
 	central  objc.ID
 	delegate objc.ID
-	queue    uintptr
 
 	scanGate     chan struct{}
 	stateChanged chan struct{}
@@ -60,26 +59,31 @@ func newDarwinManager() (*darwinManager, error) {
 	if m.delegate == 0 {
 		return nil, invalidNativeValue("+[TelesmaBLEDelegate new]")
 	}
+
 	delegateManagers.Store(m.delegate, m)
 
-	m.queue = dispatchQueueCreate("com.telesma.ble.central", 0)
-	if m.queue == 0 {
+	queue := dispatchQueueCreate("com.telesma.ble.central", 0)
+	if queue == 0 {
 		delegateManagers.Delete(m.delegate)
-		release(m.delegate)
+		m.delegate.Send(selRelease)
+
 		return nil, invalidNativeValue("dispatch_queue_create")
 	}
 
 	allocated := objc.Send[objc.ID](objc.ID(objc.GetClass("CBCentralManager")), selAlloc)
-	m.central = objc.Send[objc.ID](allocated, selInitWithDelegateQueueOptions, m.delegate, m.queue, objc.ID(0))
+
+	m.central = objc.Send[objc.ID](allocated, selInitWithDelegateQueueOptions, m.delegate, queue, objc.ID(0))
 	if m.central == 0 {
 		delegateManagers.Delete(m.delegate)
-		release(m.delegate)
+		m.delegate.Send(selRelease)
+
 		return nil, invalidNativeValue("-[CBCentralManager initWithDelegate:queue:options:]")
 	}
 
 	m.mu.Lock()
 	m.state = objc.Send[int](m.central, selState)
 	m.mu.Unlock()
+
 	return m, nil
 }
 
@@ -139,11 +143,13 @@ func Scan(ctx context.Context, service UUID) iter.Seq2[*DeviceInfo, error] {
 			yield(nil, err)
 			return
 		}
+
 		manager, err := defaultManager()
 		if err != nil {
 			yield(nil, err)
 			return
 		}
+
 		if err := manager.waitReady(ctx); err != nil {
 			yield(nil, err)
 			return
@@ -162,6 +168,7 @@ func Scan(ctx context.Context, service UUID) iter.Seq2[*DeviceInfo, error] {
 				yield(nil, scanErr)
 				return
 			}
+
 			if !yield(info, nil) {
 				return
 			}
@@ -198,12 +205,16 @@ func (m *darwinManager) startScan(ctx context.Context, service UUID) (*darwinSca
 	if m.state != cbManagerStatePoweredOn {
 		err := managerStateError(m.state)
 		m.mu.Unlock()
+
 		m.scanGate <- struct{}{}
+
 		return nil, err
 	}
+
 	m.scan = scan
 	m.central.Send(selScanForPeripheralsWithServicesOptions, newCBUUIDArray([]UUID{service}), objc.ID(0))
 	m.mu.Unlock()
+
 	return scan, nil
 }
 
@@ -213,10 +224,12 @@ func (s *darwinScan) enqueue(info *DeviceInfo) {
 		s.mu.Unlock()
 		return
 	}
+
 	if _, exists := s.seen[info.ID]; exists {
 		s.mu.Unlock()
 		return
 	}
+
 	s.seen[info.ID] = struct{}{}
 	s.pending = append(s.pending, info)
 	s.mu.Unlock()
@@ -240,14 +253,18 @@ func (s *darwinScan) next(ctx context.Context) (*DeviceInfo, error) {
 			s.pending[0] = nil
 			s.pending = s.pending[1:]
 			s.mu.Unlock()
+
 			return info, nil
 		}
+
 		err := s.err
 		closed := s.closed
 		s.mu.Unlock()
+
 		if err != nil {
 			return nil, err
 		}
+
 		if closed {
 			return nil, ErrClosed
 		}
@@ -273,7 +290,9 @@ func (s *darwinScan) stop() {
 			s.manager.scan = nil
 		}
 		s.manager.mu.Unlock()
+
 		s.manager.scanGate <- struct{}{}
+
 		s.notify()
 	})
 }
@@ -290,13 +309,16 @@ func Open(ctx context.Context, id Identifier) (Peripheral, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+
 	manager, err := defaultManager()
 	if err != nil {
 		return nil, err
 	}
+
 	if err := manager.waitReady(ctx); err != nil {
 		return nil, err
 	}
+
 	return manager.open(ctx, id)
 }
 
@@ -305,6 +327,7 @@ func (m *darwinManager) open(ctx context.Context, id Identifier) (*darwinPeriphe
 	if m.state != cbManagerStatePoweredOn {
 		err := managerStateError(m.state)
 		m.mu.Unlock()
+
 		return nil, err
 	}
 
@@ -312,6 +335,7 @@ func (m *darwinManager) open(ctx context.Context, id Identifier) (*darwinPeriphe
 	if native == 0 {
 		native = m.retrievePeripheralLocked(id)
 	}
+
 	if native == 0 {
 		m.mu.Unlock()
 		return nil, ErrNotFound
@@ -321,10 +345,12 @@ func (m *darwinManager) open(ctx context.Context, id Identifier) (*darwinPeriphe
 		m.mu.Unlock()
 		return nil, errors.New("ble: peripheral is already open")
 	}
+
 	p := newDarwinPeripheral(m, native)
 	m.active[native] = p
 
 	native.Send(selSetDelegate, m.delegate)
+
 	if objc.Send[int](native, selState) == cbPeripheralStateConnected {
 		m.mu.Unlock()
 		return p, nil
@@ -344,6 +370,7 @@ func (m *darwinManager) open(ctx context.Context, id Identifier) (*darwinPeriphe
 			m.removeActive(p)
 			return nil, err
 		}
+
 		return p, nil
 	}
 }
@@ -352,26 +379,33 @@ func (m *darwinManager) open(ctx context.Context, id Identifier) (*darwinPeriphe
 // cannot interleave with the CoreBluetooth call.
 func (m *darwinManager) retrievePeripheralLocked(id Identifier) objc.ID {
 	identifier := objc.Send[objc.ID](objc.ID(objc.GetClass("NSUUID")), selAlloc)
+
 	identifier = objc.Send[objc.ID](identifier, selInitWithUUIDString, newNSString(string(id)))
 	if identifier == 0 {
 		return 0
 	}
-	defer release(identifier)
+	defer identifier.Send(selRelease)
 
-	values := objectsFromNSArray(objc.Send[objc.ID](m.central, selRetrievePeripheralsWithIdentifiers, newNSMutableArray([]objc.ID{identifier})))
+	identifiers := objc.Send[objc.ID](objc.ID(objc.GetClass("NSMutableArray")), selArray)
+	identifiers.Send(selAddObject, identifier)
+
+	values := objectsFromNSArray(objc.Send[objc.ID](m.central, selRetrievePeripheralsWithIdentifiers, identifiers))
 	if len(values) == 0 {
 		return 0
 	}
-	native := retain(values[0])
+
+	native := values[0].Send(selRetain)
 	m.peripherals[id] = native
+
 	return native
 }
 
 func (m *darwinManager) rememberPeripheral(native objc.ID) {
 	id := identifierFromCBPeripheral(native)
+
 	m.mu.Lock()
 	if _, exists := m.peripherals[id]; !exists {
-		m.peripherals[id] = retain(native)
+		m.peripherals[id] = native.Send(selRetain)
 	}
 	m.mu.Unlock()
 }
@@ -381,6 +415,7 @@ func (m *darwinManager) removeActive(p *darwinPeripheral) {
 	if m.active[p.native] == p {
 		delete(m.active, p.native)
 	}
+
 	delete(m.connects, p.native)
 	m.mu.Unlock()
 }
@@ -390,6 +425,7 @@ func (m *darwinManager) completeConnect(native objc.ID, err error) {
 	result := m.connects[native]
 	delete(m.connects, native)
 	m.mu.Unlock()
+
 	if result != nil {
 		result <- err
 	}
@@ -400,6 +436,7 @@ func centralManagerDidUpdateState(self objc.ID, _cmd objc.SEL, central objc.ID) 
 	if !ok {
 		return
 	}
+
 	value.(*darwinManager).updateState(objc.Send[int](central, selState))
 }
 
@@ -415,15 +452,18 @@ func centralManagerDidDiscoverPeripheral(
 	if !ok {
 		return
 	}
+
 	m := value.(*darwinManager)
 	m.rememberPeripheral(peripheral)
 
 	m.mu.Lock()
 	scan := m.scan
 	m.mu.Unlock()
+
 	if scan == nil {
 		return
 	}
+
 	scan.enqueue(&DeviceInfo{
 		ID:   identifierFromCBPeripheral(peripheral),
 		Name: stringFromNSString(objc.Send[objc.ID](peripheral, selName)),
@@ -465,6 +505,7 @@ func centralManagerDidDisconnectPeripheral(
 	if !ok {
 		return
 	}
+
 	m := value.(*darwinManager)
 	err := errorFromNSError("centralManager:didDisconnectPeripheral:error:", nsError, ErrDisconnected)
 	m.completeConnect(peripheral, err)
@@ -472,6 +513,7 @@ func centralManagerDidDisconnectPeripheral(
 	m.mu.Lock()
 	p := m.active[peripheral]
 	m.mu.Unlock()
+
 	if p != nil {
 		m.removeActive(p)
 		p.handleDisconnect(err)

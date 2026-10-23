@@ -23,6 +23,7 @@ func newValueQueue() *valueQueue {
 		stopped: make(chan struct{}),
 	}
 	go q.run()
+
 	return q
 }
 
@@ -32,6 +33,7 @@ func (q *valueQueue) Send(value []byte) bool {
 		q.mu.Unlock()
 		return false
 	}
+
 	q.pending = append(q.pending, value)
 	q.mu.Unlock()
 
@@ -39,6 +41,7 @@ func (q *valueQueue) Send(value []byte) bool {
 	case q.wake <- struct{}{}:
 	default:
 	}
+
 	return true
 }
 
@@ -65,6 +68,7 @@ func (q *valueQueue) run() {
 		q.mu.Lock()
 		if len(q.pending) == 0 {
 			q.mu.Unlock()
+
 			select {
 			case <-q.wake:
 				continue
@@ -74,6 +78,7 @@ func (q *valueQueue) run() {
 		}
 
 		value := q.pending[0]
+
 		q.pending[0] = nil
 		if len(q.pending) == 1 {
 			q.pending = nil

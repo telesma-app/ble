@@ -23,10 +23,13 @@ func TestValueQueuePreservesOrder(t *testing.T) {
 			t.Fatal("timed out waiting for queued value")
 		}
 	}
+
 	queue.Close()
+
 	if queue.Send([]byte{4}) {
 		t.Fatal("Send succeeded after Close")
 	}
+
 	if _, ok := <-queue.Listen(); ok {
 		t.Fatal("Listen remained open after Close")
 	}
@@ -37,6 +40,7 @@ func TestValueQueueCloseUnblocksUnreadDelivery(t *testing.T) {
 	queue.Send([]byte{1})
 
 	done := make(chan struct{})
+
 	go func() {
 		queue.Close()
 		close(done)

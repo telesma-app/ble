@@ -21,6 +21,7 @@ func TestParseUUID(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			if uuid != UUID16(0xfffd) {
 				t.Fatalf("parseUUID(%q) = %s, want %s", value, uuid, UUID16(0xfffd))
 			}

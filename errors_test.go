@@ -16,6 +16,7 @@ func TestNativeErrorPreservesMetadataAndCause(t *testing.T) {
 	if !errors.Is(err, ErrDisconnected) {
 		t.Fatal("native error does not unwrap to ErrDisconnected")
 	}
+
 	if err.Operation != "connectPeripheral:options:" || err.Domain != "CBErrorDomain" || err.Code != 6 {
 		t.Fatalf("metadata = %#v", err)
 	}

@@ -18,7 +18,7 @@ link as part of the GATT operation.
 | macOS amd64/arm64 | CoreBluetooth and Foundation via `purego` |
 | Linux and Windows | Unsupported stub returning `ble.ErrUnavailable` |
 
-The module requires Go 1.26 or newer. It is currently an untagged prototype
+The module requires Go 1.27.3 or newer. It is currently an untagged prototype
 used by the CTAP BLE backend in `github.com/telesma-app/ctap`.
 
 ## Usage
